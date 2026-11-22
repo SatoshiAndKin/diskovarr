@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 1 — build the React frontend with Vite
 # ──────────────────────────────────────────────────────────────────────────────
-FROM node:26.7.0-alpine AS frontend
+FROM node:26.7.0-trixie-slim@sha256:5758d367d7b4f48b73a9bb3530e687e47efb289f3b43f9c0450a25225ae0db5d AS frontend
 WORKDIR /build
 
 # Install frontend deps (incl. devDeps — vite is a devDep)
@@ -28,7 +28,7 @@ RUN npm run build
 # These paths are preserved from the v1.x layout so existing
 # `-v ./data:/app/data` Docker Compose volumes upgrade in place.
 # ──────────────────────────────────────────────────────────────────────────────
-FROM node:26.7.0-alpine
+FROM node:26.7.0-trixie-slim@sha256:5758d367d7b4f48b73a9bb3530e687e47efb289f3b43f9c0450a25225ae0db5d
 WORKDIR /app
 
 # Release version, passed by CI from the git tag (.git isn't in the image).
@@ -36,8 +36,10 @@ ARG APP_VERSION=""
 ENV DISKOVARR_VERSION=${APP_VERSION}
 
 # ffmpeg: yt-dlp needs it to merge 1080p video+audio streams.
-# python3: runs the universal yt-dlp zipapp (PyInstaller binaries are glibc-only).
-RUN apk add --no-cache ffmpeg python3
+# python3: keeps existing yt-dlp zipapps in persistent data usable.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg python3 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install server runtime deps only
 COPY server/package.json server/package-lock.json* ./
