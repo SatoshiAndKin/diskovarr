@@ -41,13 +41,27 @@ jobs:
               output.write(f'node_version={pins[0][0]}\nversion={version}\n')
               output.write('runtime_base=' + re.search(r'(?mi)^FROM\s+(node:\S+)', dockerfile)[1] + '\n')
           PY
-      - name: Set up ARM64 emulation inside the isolated job VM
+      - name: Keep ARM64 emulation mounted for this isolated job
         if: inputs.platform == 'linux/arm64'
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
-          platforms: arm64
-          cache-image: false
+        shell: bash
+        env:
+          RUNTIME_BASE: ${{ steps.meta.outputs.runtime_base }}
+        run: |
+          volume="diskovarr-binfmt-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          keeper="diskovarr-binfmt-keeper-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker volume create --driver local --opt type=binfmt_misc \
+            --opt device=binfmt_misc "$volume" >/dev/null
+          # A job-owned volume and inert native container keep the registration
+          # mounted after the installer exits. A temporary installer mount alone
+          # disappears on this runner's kernel, leaving exec-format errors.
+          docker run --detach --platform linux/amd64 --network none \
+            --mount "type=volume,source=$volume,target=/binfmt,volume-nocopy" \
+            --name "$keeper" --entrypoint /usr/local/bin/node "$RUNTIME_BASE" \
+            -e 'setInterval(() => {}, 2147483647)' >/dev/null
+          docker run --rm --privileged --network none \
+            --mount "type=volume,source=$volume,target=/binfmt,volume-nocopy" \
+            tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 \
+            --mount /binfmt --install arm64
       - name: Verify ARM64 runtime emulation before building
         if: inputs.platform == 'linux/arm64'
         shell: bash
@@ -179,3 +193,15 @@ jobs:
           path: |
             ${{ runner.temp }}/diskovarr-${{ env.TARGET_ARCH }}-image.json
             ${{ runner.temp }}/diskovarr-${{ env.TARGET_ARCH }}-smoke.json
+      - name: Remove this job's emulator mount
+        if: ${{ always() && inputs.platform == 'linux/arm64' }}
+        shell: bash
+        run: |
+          keeper="diskovarr-binfmt-keeper-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          volume="diskovarr-binfmt-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if docker container inspect "$keeper" >/dev/null 2>&1; then
+            docker rm -fv "$keeper" >/dev/null
+          fi
+          if docker volume inspect "$volume" >/dev/null 2>&1; then
+            docker volume rm "$volume" >/dev/null
+          fi
