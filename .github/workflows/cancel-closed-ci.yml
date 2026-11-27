@@ -1,0 +1,21 @@
+name: Cancel closed PR CI
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+permissions: {}
+
+# Match this workflow's PR slot even when merging changes github.ref.
+concurrency:
+  group: pr-ci-ci.yml-pull_request-${{ github.event.number || format('unknown-close-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+jobs:
+  cancel:
+    # Acquiring the group cancels old work; no runner starts for a closed PR.
+    if: ${{ github.event.number && github.event.action != 'closed' }}
+    runs-on: ski-kvm-public-pr
+    steps:
+      - run: 'true'
