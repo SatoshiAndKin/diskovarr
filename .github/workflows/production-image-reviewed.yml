@@ -1,0 +1,163 @@
+name: Reviewed Diskovarr production image
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  image:
+    name: Production image (${{ inputs.platform }})
+    if: ${{ github.repository == 'SatoshiAndKin/diskovarr' && (inputs.platform == 'linux/amd64' || inputs.platform == 'linux/arm64') }}
+    runs-on:
+      group: ski-ci-public-linux
+      labels: ski-kvm-public-pr
+    permissions:
+      contents: read
+    env:
+      PLATFORM: ${{ inputs.platform }}
+      TARGET_ARCH: ${{ inputs.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve the production runtime and application version
+        id: meta
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          dockerfile = pathlib.Path('Dockerfile').read_text()
+          pins = re.findall(r'(?mi)^FROM\s+node:(\d+\.\d+\.\d+)[^\s@]*@sha256:([a-f0-9]{64})(?:\s+AS\s+\S+)?\s*$', dockerfile)
+          assert pins and len(set(pins)) == 1, 'Use one exact Node version and digest for the shipped stages'
+          version = json.loads(pathlib.Path('server/package.json').read_text())['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'node_version={pins[0][0]}\nversion={version}\n')
+          PY
+      - name: Set up ARM64 emulation inside the isolated job VM
+        if: inputs.platform == 'linux/arm64'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+          cache-image: false
+      - name: Set up the isolated production builder
+        id: builder
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.39.1
+          cache-binary: false
+          driver-opts: |
+            image=moby/buildkit@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Build and load the shipped runtime without publishing
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.builder.outputs.name }}
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platform }}
+          push: false
+          load: true
+          tags: ski-diskovarr-ci:${{ github.sha }}-${{ env.TARGET_ARCH }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/SatoshiAndKin/diskovarr
+          cache-from: type=gha,scope=diskovarr-ci-${{ env.TARGET_ARCH }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && format('type=gha,scope=diskovarr-ci-{0},mode=max', env.TARGET_ARCH) || '' }}
+      - name: Verify the built runtime and both bundled services
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          NODE_VERSION: ${{ steps.meta.outputs.node_version }}
+          BUILT_IMAGE_ID: ${{ steps.build.outputs.imageid }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          image="ski-diskovarr-ci:$GITHUB_SHA-$TARGET_ARCH"
+          container="diskovarr-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$TARGET_ARCH"
+          created=false
+          cleanup() {
+            if [[ "$created" == true ]]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT TERM
+          docker run --rm --detach --pull never --platform "$PLATFORM" --network none \
+            --name "$container" "$image" >/dev/null
+          created=true
+          docker inspect "$container" > "$RUNNER_TEMP/diskovarr-$TARGET_ARCH-inspect.json"
+          wait_ms=$(python3 - <<'PY'
+          import json, os, pathlib, re
+          temporary = pathlib.Path(os.environ['RUNNER_TEMP'])
+          state = json.loads((temporary / ('diskovarr-' + os.environ['TARGET_ARCH'] + '-inspect.json')).read_text())[0]
+          labels = state['Config']['Labels']
+          assert labels['org.opencontainers.image.revision'] == os.environ['GITHUB_SHA']
+          assert labels['org.opencontainers.image.source'] == 'https://github.com/SatoshiAndKin/diskovarr'
+          assert 'DISKOVARR_VERSION=' + os.environ['VERSION'] in state['Config']['Env']
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', state['Image'])
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ['BUILT_IMAGE_ID'])
+          report = {'revision': os.environ['GITHUB_SHA'], 'version': os.environ['VERSION'], 'platform': os.environ['PLATFORM'], 'builtImageId': os.environ['BUILT_IMAGE_ID'], 'builtDigest': os.environ['BUILT_DIGEST'], 'runtimeImageId': state['Image'], 'runnerArchitecture': os.environ['RUNNER_ARCH']}
+          (temporary / ('diskovarr-' + os.environ['TARGET_ARCH'] + '-image.json')).write_text(json.dumps(report, indent=2) + '\n')
+          health = state['Config']['Healthcheck']
+          print((health.get('StartPeriod', 0) + health['Retries'] * (health['Interval'] + health['Timeout'])) // 1_000_000)
+          PY
+          )
+          docker exec --interactive -e "EXPECTED_VERSION=$VERSION" -e "EXPECTED_NODE=$NODE_VERSION" \
+            -e "EXPECTED_ARCH=$TARGET_ARCH" -e "HEALTH_WAIT_MS=$wait_ms" "$container" node --input-type=module \
+            > "$RUNNER_TEMP/diskovarr-$TARGET_ARCH-smoke.json" <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import net from 'node:net';
+          import { setTimeout as sleep } from 'node:timers/promises';
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, process.env.EXPECTED_ARCH === 'amd64' ? 'x64' : 'arm64');
+          assert.equal(process.version, 'v' + process.env.EXPECTED_NODE);
+          assert.equal(process.env.DISKOVARR_VERSION, process.env.EXPECTED_VERSION);
+          for (const path of ['/app/.git', '/dist/.git', '/tuberr/.git']) assert.equal(fs.existsSync(path), false);
+          const deadline = Date.now() + Number(process.env.HEALTH_WAIT_MS);
+          let error;
+          while (Date.now() < deadline) {
+            try {
+              const health = await fetch('http://127.0.0.1:3232/health', { signal: AbortSignal.timeout(5000) });
+              assert.equal(health.ok, true);
+              const status = await health.json();
+              assert.equal(status.status, 'ok');
+              assert.equal(status.version, process.env.EXPECTED_VERSION);
+              const home = await fetch('http://127.0.0.1:3232/', { signal: AbortSignal.timeout(5000), redirect: 'manual' });
+              assert.equal(home.ok, true);
+              const asset = (await home.text()).match(/<script\b[^>]*\bsrc="(\/assets\/[^\"]+)"/)?.[1];
+              assert.ok(asset, 'The runtime must serve the built frontend');
+              const bundle = await fetch('http://127.0.0.1:3232' + asset, { signal: AbortSignal.timeout(5000) });
+              assert.equal(bundle.ok, true);
+              assert.ok((await bundle.arrayBuffer()).byteLength > 0);
+              await new Promise((resolve, reject) => {
+                const socket = net.createConnection({ host: '127.0.0.1', port: 9832 });
+                socket.setTimeout(5000);
+                socket.once('connect', () => { socket.destroy(); resolve(); });
+                socket.once('error', reject);
+                socket.once('timeout', () => { socket.destroy(); reject(new Error('Bundled Tuberr did not start')); });
+              });
+              console.log(JSON.stringify({ node: process.version, platform: process.platform, architecture: process.arch, version: status.version, database: 'ok', frontend: 'ok', tuberr: 'listening' }));
+              process.exit(0);
+            } catch (caught) { error = caught; await sleep(1000); }
+          }
+          throw error || new Error('The production image did not become healthy');
+          JS
+      - name: Retain the runtime image evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: production-image-${{ env.TARGET_ARCH }}
+          path: |
+            ${{ runner.temp }}/diskovarr-${{ env.TARGET_ARCH }}-image.json
+            ${{ runner.temp }}/diskovarr-${{ env.TARGET_ARCH }}-smoke.json
