@@ -49,6 +49,18 @@ jobs:
         run: |
           volume="diskovarr-binfmt-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           keeper="diskovarr-binfmt-keeper-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          # Resolve the native leaf of the same pinned production index. The
+          # classic Docker image store cannot cache both architectures under
+          # one index digest, so the inert keeper uses its own leaf reference.
+          docker manifest inspect "$RUNTIME_BASE" > "$RUNNER_TEMP/diskovarr-node-index.json"
+          keeper_image=$(python3 - <<'PY'
+          import json, os, pathlib, re
+          index = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'diskovarr-node-index.json').read_text())
+          candidates = [m['digest'] for m in index['manifests'] if m.get('platform', {}).get('os') == 'linux' and m.get('platform', {}).get('architecture') == 'amd64']
+          assert len(candidates) == 1 and re.fullmatch(r'sha256:[0-9a-f]{64}', candidates[0])
+          print(os.environ['RUNTIME_BASE'].split('@')[0] + '@' + candidates[0])
+          PY
+          )
           docker volume create --driver local --opt type=binfmt_misc \
             --opt device=binfmt_misc "$volume" >/dev/null
           # A job-owned volume and inert native container keep the registration
@@ -56,7 +68,7 @@ jobs:
           # disappears on this runner's kernel, leaving exec-format errors.
           docker run --detach --platform linux/amd64 --network none \
             --mount "type=volume,source=$volume,target=/binfmt,volume-nocopy" \
-            --name "$keeper" --entrypoint /usr/local/bin/node "$RUNTIME_BASE" \
+            --name "$keeper" --entrypoint /usr/local/bin/node "$keeper_image" \
             -e 'setInterval(() => {}, 2147483647)' >/dev/null
           docker run --rm --privileged --network none \
             --mount "type=volume,source=$volume,target=/binfmt,volume-nocopy" \
