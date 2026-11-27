@@ -52,14 +52,14 @@ jobs:
     name: Linux AMD64 runtime
     permissions:
       contents: read
-    uses: SatoshiAndKin/diskovarr/.github/workflows/production-image-reviewed.yml@3994c66ef7b56a83853745bde129c9d51eb65d9f
+    uses: SatoshiAndKin/diskovarr/.github/workflows/production-image-reviewed.yml@89e685cb00195e84970390feb926faa5300de585
     with:
       platform: linux/amd64
   image_arm64:
     name: Linux ARM64 runtime
     permissions:
       contents: read
-    uses: SatoshiAndKin/diskovarr/.github/workflows/production-image-reviewed.yml@3994c66ef7b56a83853745bde129c9d51eb65d9f
+    uses: SatoshiAndKin/diskovarr/.github/workflows/production-image-reviewed.yml@89e685cb00195e84970390feb926faa5300de585
     with:
       platform: linux/arm64
   required:
