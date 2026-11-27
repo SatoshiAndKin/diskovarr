@@ -16,4 +16,4 @@ jobs:
   ci:
     permissions:
       contents: read
-    uses: SatoshiAndKin/diskovarr/.github/workflows/ci-reviewed-linux.yml@a52dc1efd07ea29b45342292ab39a9e660297da5
+    uses: SatoshiAndKin/diskovarr/.github/workflows/ci-reviewed-linux.yml@307148434043c574270b80b837b7cabddf985a11
