@@ -88,11 +88,18 @@ jobs:
           container="diskovarr-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$TARGET_ARCH"
           created=false
           cleanup() {
-            if [[ "$created" == true ]]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
+            status=$?
+            if [[ "$created" == true ]]; then
+              if [[ "$status" != 0 ]]; then
+                docker inspect --format 'Runtime state: {{.State.Status}}, exit={{.State.ExitCode}}, oom={{.State.OOMKilled}}' "$container" || true
+              fi
+              docker rm -fv "$container" >/dev/null 2>&1 || true
+            fi
           }
           trap cleanup EXIT
           trap 'exit 130' INT TERM
-          docker run --rm --detach --pull never --platform "$PLATFORM" --network none \
+          docker run --detach --pull never --platform "$PLATFORM" --network none \
+            --env SESSION_SECRET=diskovarr-ci-only-non-production-session-fixture \
             --name "$container" "$image" >/dev/null
           created=true
           docker inspect "$container" > "$RUNNER_TEMP/diskovarr-$TARGET_ARCH-inspect.json"
