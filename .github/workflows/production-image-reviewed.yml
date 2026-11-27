@@ -39,6 +39,7 @@ jobs:
           assert re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'node_version={pins[0][0]}\nversion={version}\n')
+              output.write('runtime_base=' + re.search(r'(?mi)^FROM\s+(node:\S+)', dockerfile)[1] + '\n')
           PY
       - name: Set up ARM64 emulation inside the isolated job VM
         if: inputs.platform == 'linux/arm64'
@@ -47,6 +48,14 @@ jobs:
           image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
           platforms: arm64
           cache-image: false
+      - name: Verify ARM64 runtime emulation before building
+        if: inputs.platform == 'linux/arm64'
+        shell: bash
+        env:
+          RUNTIME_BASE: ${{ steps.meta.outputs.runtime_base }}
+        run: |
+          docker run --rm --platform "$PLATFORM" --network none \
+            --entrypoint /usr/local/bin/node "$RUNTIME_BASE" --version
       - name: Set up the isolated production builder
         id: builder
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -92,6 +101,8 @@ jobs:
             if [[ "$created" == true ]]; then
               if [[ "$status" != 0 ]]; then
                 docker inspect --format 'Runtime state: {{.State.Status}}, exit={{.State.ExitCode}}, oom={{.State.OOMKilled}}' "$container" || true
+                # Print only emulator/exec errors, never application logs or keys.
+                docker logs "$container" 2>&1 | python3 -c 'import re, sys; [print(line.rstrip()) for line in sys.stdin if re.match(r"^(exec /|qemu[-:]|/usr/bin/qemu)", line)]' || true
               fi
               docker rm -fv "$container" >/dev/null 2>&1 || true
             fi
