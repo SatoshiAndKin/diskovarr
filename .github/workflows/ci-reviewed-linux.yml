@@ -1,0 +1,84 @@
+name: Reviewed Diskovarr CI
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Tests, lint and frontend build
+    if: github.repository == 'SatoshiAndKin/diskovarr'
+    runs-on:
+      group: ski-ci-public-linux
+      labels: ski-kvm-public-pr
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve the production runtime and application version
+        id: meta
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          dockerfile = pathlib.Path('Dockerfile').read_text()
+          pins = re.findall(r'(?mi)^FROM\s+node:(\d+\.\d+\.\d+)[^\s@]*@sha256:([a-f0-9]{64})(?:\s+AS\s+\S+)?\s*$', dockerfile)
+          assert pins and len(set(pins)) == 1, 'Use one exact Node version and digest for the shipped stages'
+          version = json.loads(pathlib.Path('server/package.json').read_text())['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'node_version={pins[0][0]}\nversion={version}\n')
+          PY
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ steps.meta.outputs.node_version }}
+          package-manager-cache: false
+      - name: Install all three locked dependency sets
+        run: |
+          npm ci
+          npm ci --prefix server
+          npm ci --prefix tuberr
+      - name: Run the complete test suite
+        run: npm test
+      - name: Lint
+        run: npm run lint
+      - name: Build the frontend
+        run: npm run build
+  image_amd64:
+    name: Linux AMD64 runtime
+    permissions:
+      contents: read
+    uses: SatoshiAndKin/diskovarr/.github/workflows/production-image-reviewed.yml@074abd56e6937975e1767881842f6667926fd24c
+    with:
+      platform: linux/amd64
+  image_arm64:
+    name: Linux ARM64 runtime
+    permissions:
+      contents: read
+    uses: SatoshiAndKin/diskovarr/.github/workflows/production-image-reviewed.yml@074abd56e6937975e1767881842f6667926fd24c
+    with:
+      platform: linux/arm64
+  required:
+    name: Required CI
+    if: ${{ always() && !cancelled() }}
+    needs: [validate, image_amd64, image_arm64]
+    runs-on:
+      group: ski-ci-public-linux
+      labels: ski-kvm-public-pr
+    permissions: {}
+    steps:
+      - name: Require every validation and shipped image
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert set(results) == {'validate', 'image_amd64', 'image_arm64'}, results
+          assert all(job['result'] == 'success' for job in results.values()), results
+          print('Tests, lint, frontend and both production runtimes passed')
+          PY
