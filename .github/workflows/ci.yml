@@ -17,3 +17,5 @@ jobs:
     permissions:
       contents: read
     uses: SatoshiAndKin/diskovarr/.github/workflows/ci-reviewed-linux.yml@0d1474d06aad801c96e58d0371541e8b8cc17703
+
+# Disposable queued cancellation canary. Do not merge.
